@@ -1,0 +1,923 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# ███████╗██╗░░░░░███████╗███████╗██████╗░██╗░░██╗██╗░░░██╗  ███████╗███████╗██╗░░░░░███████╗░██████╗██████╗░░█████╗░███╗░░░███╗
+# ██╔════╝██║░░░░░██╔════╝██╔════╝██╔══██╗██║░░██║╚██╗░██╔╝  ██╔════╝██╔════╝██║░░░░░██╔════╝██╔════╝██╔══██╗██╔══██╗████╗░████║
+# █████╗░░██║░░░░░█████╗░░█████╗░░██████╔╝███████║░╚████╔╝░  █████╗░░█████╗░░██║░░░░░█████╗░░╚█████╗░██████╔╝███████║██╔████╔██║
+# ██╔══╝░░██║░░░░░██╔══╝░░██╔══╝░░██╔══██╗██╔══██║░░╚██╔╝░░  ██╔══╝░░██╔══╝░░██║░░░░░██╔══╝░░░╚═══██╗██╔═══╝░██╔══██║██║╚██╔╝██║
+# ███████╗███████╗███████╗███████╗██║░░██║██║░░██║░░░██║░░░  ██║░░░░░███████╗███████╗███████╗██████╔╝██║░░░░░██║░░██║██║░╚═╝░██║
+# ╚══════╝╚══════╝╚══════╝╚══════╝╚═╝░░╚═╝╚═╝░░╚═╝░░░╚═╝░░░  ╚═╝░░░░░╚══════╝╚══════╝╚══════╝╚═════╝░╚═╝░░░░░╚═╝░░╚═╝╚═╝░░░░░╚═╝
+
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+import time
+import sqlite3
+import re
+import json
+import hashlib
+import requests
+import random
+import string
+from datetime import datetime
+import phonenumbers
+from phonenumbers import carrier, geocoder, timezone as phone_tz
+from bs4 import BeautifulSoup
+
+# ============================================================================================================
+# ⚙️ KONFIGURASYON
+# ============================================================================================================
+
+TOKEN = "7786359481:AAEScArlca983zOpo8BVFx1yH1ugmva2srE"
+OWNER_ID = 8682060694
+CHANNEL_USERNAME = "@elsephytelegram"
+BOT_NAME = "Elsephy Selegram"
+BOT_VERSION = "8.0.0"
+WHATSAPP_NUMBER = "05015898789"
+WHATSAPP_LINK = f"https://wa.me/90{WHATSAPP_NUMBER.replace(' ', '')}"
+
+# Rate Limit
+RATE_LIMIT_SECONDS = 4
+
+# Kredi Sistemi
+START_CREDIT = 10
+COST_PER_SEARCH = 2
+INVITE_REQUIRED = 5
+INVITE_CREDIT_REWARD = 10
+
+# User Agents
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+]
+
+# ============================================================================================================
+# 🗄️ VERITABANI
+# ============================================================================================================
+
+conn = sqlite3.connect('elsephy_bot.db', check_same_thread=False)
+c = conn.cursor()
+
+# Kullanicilar tablosu
+c.execute('''CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    language TEXT DEFAULT 'tr',
+    credit INTEGER DEFAULT 10,
+    total_searches INTEGER DEFAULT 0,
+    join_date INTEGER,
+    last_active INTEGER,
+    invited_by INTEGER,
+    invite_count INTEGER DEFAULT 0,
+    is_banned INTEGER DEFAULT 0
+)''')
+
+# OSINT log tablosu
+c.execute('''CREATE TABLE IF NOT EXISTS osint_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    query TEXT,
+    query_type TEXT,
+    platform TEXT,
+    result TEXT,
+    timestamp INTEGER
+)''')
+
+# Cache tablosu
+c.execute('''CREATE TABLE IF NOT EXISTS cache (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    expires INTEGER
+)''')
+
+# Ticket tablosu
+c.execute('''CREATE TABLE IF NOT EXISTS tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    message TEXT,
+    status TEXT DEFAULT 'open',
+    created_at INTEGER
+)''')
+
+# Kredi anahtari tablosu
+c.execute('''CREATE TABLE IF NOT EXISTS credit_keys (
+    code TEXT PRIMARY KEY,
+    amount INTEGER,
+    used INTEGER DEFAULT 0,
+    created_by INTEGER
+)''')
+
+conn.commit()
+
+# ============================================================================================================
+# 🤖 BOT BASLATMA
+# ============================================================================================================
+
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
+user_last_command = {}
+
+# ============================================================================================================
+# 🔧 YARDIMCI FONKSIYONLAR
+# ============================================================================================================
+
+def is_rate_limited(user_id):
+    now = time.time()
+    if user_id in user_last_command:
+        if now - user_last_command[user_id] < RATE_LIMIT_SECONDS:
+            return True
+    user_last_command[user_id] = now
+    return False
+
+def get_user_lang(user_id):
+    c.execute("SELECT language FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    return row[0] if row else 'tr'
+
+def get_user_credit(user_id):
+    c.execute("SELECT credit FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    return row[0] if row else START_CREDIT
+
+def add_credit(user_id, amount):
+    c.execute("UPDATE users SET credit = credit + ? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+
+def deduct_credit(user_id, amount):
+    current = get_user_credit(user_id)
+    if current >= amount:
+        c.execute("UPDATE users SET credit = credit - ? WHERE user_id=?", (amount, user_id))
+        conn.commit()
+        return True
+    return False
+
+def add_to_cache(key, value, duration=86400):
+    c.execute("INSERT OR REPLACE INTO cache (key, value, expires) VALUES (?,?,?)",
+              (key, json.dumps(value), int(time.time()) + duration))
+    conn.commit()
+
+def get_from_cache(key):
+    c.execute("SELECT value, expires FROM cache WHERE key=?", (key,))
+    row = c.fetchone()
+    if row and row[1] > int(time.time()):
+        return json.loads(row[0])
+    return None
+
+def log_osint(user_id, query, query_type, platform, result):
+    c.execute("INSERT INTO osint_logs (user_id, query, query_type, platform, result, timestamp) VALUES (?,?,?,?,?,?)",
+              (user_id, query[:200], query_type, platform, result[:1000], int(time.time())))
+    conn.commit()
+    c.execute("UPDATE users SET total_searches = total_searches + 1 WHERE user_id=?", (user_id,))
+    conn.commit()
+
+def is_channel_member(user_id):
+    try:
+        member = bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except:
+        return False
+
+def get_random_ua():
+    return random.choice(USER_AGENTS)
+
+def make_request(url, timeout=15):
+    headers = {'User-Agent': get_random_ua()}
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout)
+        return {'success': response.status_code == 200, 'content': response.text, 'status': response.status_code}
+    except:
+        return {'success': False, 'content': '', 'status': 0}
+
+# ============================================================================================================
+# 🌍 DIL DESTEGI (DUZELTILMIS - KACIS KARAKTERLERI YOK)
+# ============================================================================================================
+
+TEXTS = {
+    'tr': {
+        'welcome': f"🎉 <b>{BOT_NAME}'a HOSGELDIN!</b>\n\n💎 <b>{START_CREDIT} Kredi</b> kazandin!\n🔍 Her sorgu <b>{COST_PER_SEARCH} kredi</b> harcar.\n\n📌 <b>Komutlar:</b>\n/osint - OSINT sorgusu\n/kredi - Kredi durumu\n/profil - Profilim\n/davet - Davet linki\n/dil - Dil degistir\n/destek - Destek talebi\n/yardim - Yardim\n\n📞 WhatsApp: {WHATSAPP_NUMBER}",
+        'searching': "🔍 <b>ARANIYOR...</b>\n\n📡 Veritabanlari taranıyor...\n🌐 Sosyal medya kontrol ediliyor...\n⏳ Lutfen bekleyin...",
+        'no_credit': f"❌ <b>YETERSIZ KREDI!</b>\n\n💎 Kredi almak icin:\n• @elsephyselegram ile iletisime gec\n• {INVITE_REQUIRED} davet = {INVITE_CREDIT_REWARD} kredi\n• WhatsApp: {WHATSAPP_NUMBER}",
+        'rate_limit': f"⚠️ <b>YAVASLA!</b>\n\n(•) Cok hizli islem yapiyorsun!\n⏱️ Lutfen {RATE_LIMIT_SECONDS} saniye bekle.",
+        'need_channel': f"❌ <b>KANAL ZORUNLULUGU</b>\n\n🔒 Botu kullanmak icin once kanala katilmalisin!\n📢 {CHANNEL_USERNAME}",
+        'phone_result': "📞 <b>TELEFON BILGILERI</b>\n{info}",
+        'email_result': "📧 <b>EMAIL BILGILERI</b>\n{info}",
+        'telegram_result': "📟 <b>TELEGRAM BILGILERI</b>\n{info}",
+        'instagram_result': "📸 <b>INSTAGRAM BILGILERI</b>\n{info}",
+        'tiktok_result': "🎵 <b>TIKTOK BILGILERI</b>\n{info}",
+        'twitter_result': "🐦 <b>TWITTER BILGILERI</b>\n{info}",
+        'not_found': "❌ <b>SONUC BULUNAMADI</b>\n\nAradiginiz bilgiye ulasilamadi.",
+        'help': f"""📖 <b>YARDIM MENUSU</b>
+━━━━━━━━━━━━━━━━━━━━
+🔍 <b>OSINT SORGULARI:</b>
+/osint @kullanici - Telegram
+/osint 905xxxxxxxxx - Telefon
+/osint email@adres.com - Email
+/osint instagram.com/kullanici - Instagram
+/osint tiktok.com/@kullanici - TikTok
+
+💰 <b>KREDI SISTEMI:</b>
+/kredi - Kredi durumu
+/profil - Profil bilgileri
+/davet - Davet linki
+{INVITE_REQUIRED} davet = {INVITE_CREDIT_REWARD} kredi
+
+🌍 <b>DIGER:</b>
+/dil - Dil degistir
+/destek - Destek talebi
+/yardim - Bu menu
+
+📞 WhatsApp: {WHATSAPP_NUMBER}"""
+    },
+    'en': {
+        'welcome': f"🎉 <b>WELCOME TO {BOT_NAME}!</b>\n\n💎 You got <b>{START_CREDIT} Credits</b>!\n🔍 Each search costs <b>{COST_PER_SEARCH} credits</b>.\n\n📌 <b>Commands:</b>\n/osint - OSINT search\n/credits - Credit status\n/profile - My profile\n/invite - Invite link\n/language - Change language\n/support - Support ticket\n/help - Help\n\n📞 WhatsApp: {WHATSAPP_NUMBER}",
+        'searching': "🔍 <b>SEARCHING...</b>\n\n📡 Scanning databases...\n🌐 Checking social media...\n⏳ Please wait...",
+        'no_credit': f"❌ <b>INSUFFICIENT CREDITS!</b>\n\n💎 To get credits:\n• Contact @elsephyselegram\n• {INVITE_REQUIRED} invites = {INVITE_CREDIT_REWARD} credits\n• WhatsApp: {WHATSAPP_NUMBER}",
+        'rate_limit': f"⚠️ <b>SLOW DOWN!</b>\n\n(•) You're too fast!\n⏱️ Please wait {RATE_LIMIT_SECONDS} seconds.",
+        'need_channel': f"❌ <b>CHANNEL REQUIRED</b>\n\n🔒 You must join the channel first!\n📢 {CHANNEL_USERNAME}",
+        'phone_result': "📞 <b>PHONE INFORMATION</b>\n{info}",
+        'email_result': "📧 <b>EMAIL INFORMATION</b>\n{info}",
+        'telegram_result': "📟 <b>TELEGRAM INFORMATION</b>\n{info}",
+        'instagram_result': "📸 <b>INSTAGRAM INFORMATION</b>\n{info}",
+        'tiktok_result': "🎵 <b>TIKTOK INFORMATION</b>\n{info}",
+        'twitter_result': "🐦 <b>TWITTER INFORMATION</b>\n{info}",
+        'not_found': "❌ <b>NO RESULTS FOUND</b>\n\nCould not find the information you searched for.",
+        'help': f"""📖 <b>HELP MENU</b>
+━━━━━━━━━━━━━━━━━━━━
+🔍 <b>OSINT QUERIES:</b>
+/osint @username - Telegram
+/osint 905xxxxxxxxx - Phone
+/osint email@address.com - Email
+/osint instagram.com/username - Instagram
+/osint tiktok.com/@username - TikTok
+
+💰 <b>CREDIT SYSTEM:</b>
+/credits - Credit status
+/profile - Profile info
+/invite - Invite link
+{INVITE_REQUIRED} invites = {INVITE_CREDIT_REWARD} credits
+
+🌍 <b>OTHER:</b>
+/language - Change language
+/support - Support ticket
+/help - This menu
+
+📞 WhatsApp: {WHATSAPP_NUMBER}"""
+    },
+    'ru': {
+        'welcome': f"🎉 <b>DOBRO POZHALOVAT V {BOT_NAME}!</b>\n\n💎 Vy poluchili <b>{START_CREDIT} Kreditov</b>!\n🔍 Kazhdyj poisk stoit <b>{COST_PER_SEARCH} kreditov</b>.\n\n📌 <b>Komandy:</b>\n/osint - OSINT poisk\n/credits - Kredity\n/profile - Moj profil\n/invite - Priglashenie\n/language - Yazyk\n/support - Podderzhka\n/help - Pomosch\n\n📞 WhatsApp: {WHATSAPP_NUMBER}",
+        'searching': "🔍 <b>POISK...</b>\n\n📡 Skanirovanie baz dannyh...\n🌐 Proverka socsetej...\n⏳ Pozhalujsta, podozhdite...",
+        'no_credit': f"❌ <b>NEDOSTATOCHNO KREDITOV!</b>\n\n💎 Chtoby poluchit kredity:\n• Svyazhites s @elsephyselegram\n• {INVITE_REQUIRED} priglashenij = {INVITE_CREDIT_REWARD} kreditov\n• WhatsApp: {WHATSAPP_NUMBER}",
+        'rate_limit': f"⚠️ <b>POMEDLENNEE!</b>\n\n(•) Slishkom bystro!\n⏱️ Podozhdite {RATE_LIMIT_SECONDS} sekund.",
+        'need_channel': f"❌ <b>TREBUETSYa PODPISKA</b>\n\n🔒 Vy dolzhny podpisatsya na kanal!\n📢 {CHANNEL_USERNAME}",
+        'phone_result': "📞 <b>INFORMACIYa O TELEFONE</b>\n{info}",
+        'email_result': "📧 <b>INFORMACIYa O EMAIL</b>\n{info}",
+        'telegram_result': "📟 <b>INFORMACIYa O TELEGRAM</b>\n{info}",
+        'instagram_result': "📸 <b>INFORMACIYa O INSTAGRAM</b>\n{info}",
+        'tiktok_result': "🎵 <b>INFORMACIYa O TIKTOK</b>\n{info}",
+        'twitter_result': "🐦 <b>INFORMACIYa O TWITTER</b>\n{info}",
+        'not_found': "❌ <b>NICHEGO NE NAJDENO</b>\n\nNe udalos najti informaciyu.",
+        'help': f"""📖 <b>POMOSCH</b>
+━━━━━━━━━━━━━━━━━━━━
+🔍 <b>OSINT ZAPROSY:</b>
+/osint @username - Telegram
+/osint 905xxxxxxxxx - Telefon
+/osint email@address.com - Email
+/osint instagram.com/username - Instagram
+/osint tiktok.com/@username - TikTok
+
+💰 <b>KREDITY:</b>
+/credits - Kredity
+/profile - Profil
+/invite - Priglashenie
+{INVITE_REQUIRED} priglashenij = {INVITE_CREDIT_REWARD} kreditov
+
+🌍 <b>DRUGOE:</b>
+/language - Yazyk
+/support - Podderzhka
+/help - Pomosch
+
+📞 WhatsApp: {WHATSAPP_NUMBER}"""
+    }
+}
+
+def get_text(user_id, key):
+    lang = get_user_lang(user_id)
+    text_dict = TEXTS.get(lang, TEXTS['tr'])
+    return text_dict.get(key, TEXTS['tr'][key])
+
+# ============================================================================================================
+# 🔍 OSINT ARAMA FONKSIYONLARI
+# ============================================================================================================
+
+def search_phone(phone, user_id):
+    results = []
+    phone_clean = re.sub(r'[^0-9+]', '', phone)
+    
+    if phone_clean.startswith('0') and len(phone_clean) == 11:
+        phone_clean = '+90' + phone_clean[1:]
+    elif not phone_clean.startswith('+'):
+        phone_clean = '+' + phone_clean
+    
+    try:
+        parsed = phonenumbers.parse(phone_clean, None)
+        country = geocoder.description_for_number(parsed, "tr")
+        carrier_name = carrier.name_for_number(parsed, "tr")
+        timezones = phone_tz.time_zones_for_number(parsed)
+        is_valid = phonenumbers.is_valid_number(parsed)
+        
+        results.append(f"📞 Numara: {phone_clean}")
+        results.append(f"🌍 Ulke: {country}")
+        results.append(f"📡 Operator: {carrier_name if carrier_name else 'Bilinmiyor'}")
+        results.append(f"✅ Gecerli: {'Evet' if is_valid else 'Hayir'}")
+        results.append(f"🕐 Zaman Dilimi: {', '.join(timezones) if timezones else 'Bilinmiyor'}")
+    except:
+        results.append("❌ Gecersiz telefon numarasi formati")
+    
+    results.append(f"\n🔗 WhatsApp: https://wa.me/{phone_clean.replace('+', '')}")
+    results.append(f"🔗 Telegram: https://t.me/{phone_clean.replace('+', '')}")
+    
+    return "\n".join(results)
+
+def search_email(email, user_id):
+    results = []
+    email = email.lower().strip()
+    
+    results.append(f"📧 Email: {email}")
+    domain = email.split('@')[1] if '@' in email else ''
+    results.append(f"🌐 Domain: {domain}")
+    
+    try:
+        import dns.resolver
+        mx_records = dns.resolver.resolve(domain, 'MX')
+        mx_list = [str(mx.exchange) for mx in mx_records][:3]
+        results.append(f"📡 MX Kayitlari: {', '.join(mx_list)}")
+    except:
+        results.append("📡 MX Kayitlari: Bulunamadi")
+    
+    username = email.split('@')[0]
+    results.append(f"\n🔍 Olası Sosyal Medya:")
+    results.append(f"📸 Instagram: https://instagram.com/{username}")
+    results.append(f"🐦 Twitter: https://twitter.com/{username}")
+    results.append(f"📟 Telegram: https://t.me/{username}")
+    results.append(f"🎵 TikTok: https://tiktok.com/@{username}")
+    
+    return "\n".join(results)
+
+def search_telegram(username, user_id):
+    results = []
+    username = username.replace('@', '').strip()
+    
+    results.append(f"📟 Telegram Kullanici: @{username}")
+    results.append(f"🔗 Profil Linki: https://t.me/{username}")
+    
+    response = make_request(f"https://t.me/{username}")
+    if response['success']:
+        soup = BeautifulSoup(response['content'], 'html.parser')
+        
+        title_elem = soup.find('div', class_='tgme_page_title')
+        if title_elem:
+            name_span = title_elem.find('span')
+            if name_span:
+                results.append(f"👤 Isim: {name_span.text}")
+        
+        bio_elem = soup.find('div', class_='tgme_page_description')
+        if bio_elem:
+            results.append(f"📝 Bio: {bio_elem.text[:100]}")
+    else:
+        results.append("❌ Kullanici bulunamadi veya hesap gizli")
+    
+    results.append(f"\n🔍 Diger Platformlarda:")
+    results.append(f"📸 Instagram: https://instagram.com/{username}")
+    results.append(f"🎵 TikTok: https://tiktok.com/@{username}")
+    
+    return "\n".join(results)
+
+def search_instagram(username, user_id):
+    results = []
+    
+    if 'instagram.com/' in username:
+        username = username.split('instagram.com/')[-1].split('/')[0].split('?')[0]
+    username = username.replace('@', '').strip()
+    
+    results.append(f"📸 Instagram Kullanici: @{username}")
+    results.append(f"🔗 Profil Linki: https://instagram.com/{username}")
+    
+    response = make_request(f"https://instagram.com/{username}", timeout=10)
+    if response['success']:
+        soup = BeautifulSoup(response['content'], 'html.parser')
+        
+        meta_title = soup.find('meta', property='og:title')
+        if meta_title:
+            results.append(f"👤 Isim: {meta_title.get('content', '')}")
+        
+        meta_desc = soup.find('meta', property='og:description')
+        if meta_desc:
+            results.append(f"📝 Bio: {meta_desc.get('content', '')[:100]}")
+    else:
+        results.append("❌ Kullanici bulunamadi veya hesap gizli")
+    
+    return "\n".join(results)
+
+def search_tiktok(username, user_id):
+    results = []
+    
+    if 'tiktok.com/' in username:
+        username = username.split('tiktok.com/@')[-1].split('/')[0].split('?')[0]
+    username = username.replace('@', '').strip()
+    
+    results.append(f"🎵 TikTok Kullanici: @{username}")
+    results.append(f"🔗 Profil Linki: https://tiktok.com/@{username}")
+    
+    response = make_request(f"https://tiktok.com/@{username}", timeout=10)
+    if response['success']:
+        soup = BeautifulSoup(response['content'], 'html.parser')
+        
+        meta_title = soup.find('meta', property='og:title')
+        if meta_title:
+            results.append(f"👤 Isim: {meta_title.get('content', '')}")
+        
+        meta_desc = soup.find('meta', property='og:description')
+        if meta_desc:
+            results.append(f"📝 Bio: {meta_desc.get('content', '')[:100]}")
+    else:
+        results.append("❌ Kullanici bulunamadi")
+    
+    return "\n".join(results)
+
+def search_twitter(username, user_id):
+    results = []
+    
+    if 'twitter.com/' in username or 'x.com/' in username:
+        username = username.split('/')[-1].split('?')[0]
+    username = username.replace('@', '').strip()
+    
+    results.append(f"🐦 Twitter/X Kullanici: @{username}")
+    results.append(f"🔗 Profil Linki: https://twitter.com/{username}")
+    
+    response = make_request(f"https://twitter.com/{username}", timeout=10)
+    if response['success']:
+        soup = BeautifulSoup(response['content'], 'html.parser')
+        
+        meta_title = soup.find('meta', property='og:title')
+        if meta_title:
+            results.append(f"👤 Isim: {meta_title.get('content', '')}")
+        
+        meta_desc = soup.find('meta', property='og:description')
+        if meta_desc:
+            results.append(f"📝 Bio: {meta_desc.get('content', '')[:100]}")
+    else:
+        results.append("❌ Kullanici bulunamadi")
+    
+    return "\n".join(results)
+
+def detect_query_type(query):
+    query = query.strip()
+    
+    if query.startswith('@'):
+        return 'telegram', query
+    if re.match(r'^[\+]?[0-9\s\-\(\)]{10,20}$', query):
+        return 'phone', query
+    if re.match(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$', query):
+        return 'email', query
+    if 'instagram.com/' in query:
+        return 'instagram', query
+    if 'tiktok.com/' in query:
+        return 'tiktok', query
+    if 'twitter.com/' in query or 'x.com/' in query:
+        return 'twitter', query
+    
+    return 'telegram', query
+
+def perform_osint_search(query, user_id):
+    query_type, clean_query = detect_query_type(query)
+    cache_key = hashlib.md5(f"{query_type}:{clean_query}".encode()).hexdigest()
+    
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+    
+    if query_type == 'phone':
+        result = search_phone(clean_query, user_id)
+        platform = 'phone'
+        result_text = get_text(user_id, 'phone_result').format(info=result)
+    elif query_type == 'email':
+        result = search_email(clean_query, user_id)
+        platform = 'email'
+        result_text = get_text(user_id, 'email_result').format(info=result)
+    elif query_type == 'telegram':
+        result = search_telegram(clean_query, user_id)
+        platform = 'telegram'
+        result_text = get_text(user_id, 'telegram_result').format(info=result)
+    elif query_type == 'instagram':
+        result = search_instagram(clean_query, user_id)
+        platform = 'instagram'
+        result_text = get_text(user_id, 'instagram_result').format(info=result)
+    elif query_type == 'tiktok':
+        result = search_tiktok(clean_query, user_id)
+        platform = 'tiktok'
+        result_text = get_text(user_id, 'tiktok_result').format(info=result)
+    elif query_type == 'twitter':
+        result = search_twitter(clean_query, user_id)
+        platform = 'twitter'
+        result_text = get_text(user_id, 'twitter_result').format(info=result)
+    else:
+        result_text = get_text(user_id, 'not_found')
+        platform = 'unknown'
+    
+    log_osint(user_id, query, query_type, platform, result)
+    add_to_cache(cache_key, result_text, 3600)
+    
+    return result_text
+
+# ============================================================================================================
+# 🤖 TELEGRAM KOMUTLARI
+# ============================================================================================================
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    user_id = message.from_user.id
+    
+    if not is_channel_member(user_id):
+        bot.send_message(user_id, get_text(user_id, 'need_channel'))
+        return
+    
+    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    if not c.fetchone():
+        c.execute("INSERT INTO users (user_id, username, first_name, join_date, last_active) VALUES (?,?,?,?,?)",
+                  (user_id, message.from_user.username, message.from_user.first_name, int(time.time()), int(time.time())))
+        conn.commit()
+        bot.send_message(user_id, get_text(user_id, 'welcome'))
+    else:
+        c.execute("UPDATE users SET last_active=? WHERE user_id=?", (int(time.time()), user_id))
+        conn.commit()
+    
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(KeyboardButton("🔍 /osint"), KeyboardButton("💰 /kredi"))
+    markup.add(KeyboardButton("👤 /profil"), KeyboardButton("📨 /davet"))
+    markup.add(KeyboardButton("🌍 /dil"), KeyboardButton("🎫 /destek"))
+    markup.add(KeyboardButton("📖 /yardim"))
+    
+    bot.send_message(user_id, f"✅ Hos geldin {message.from_user.first_name}!\n💎 Kredin: {get_user_credit(user_id)}", reply_markup=markup)
+
+@bot.message_handler(commands=['osint'])
+def osint_command(message):
+    user_id = message.from_user.id
+    
+    if not is_channel_member(user_id):
+        bot.send_message(user_id, get_text(user_id, 'need_channel'))
+        return
+    
+    if is_rate_limited(user_id):
+        bot.send_message(user_id, get_text(user_id, 'rate_limit'))
+        return
+    
+    if get_user_credit(user_id) < COST_PER_SEARCH:
+        bot.send_message(user_id, get_text(user_id, 'no_credit'))
+        return
+    
+    query = message.text.replace('/osint', '').strip()
+    if not query:
+        bot.send_message(user_id, "🔍 <b>OSINT SORGULAMA</b>\n\nOrnek kullanimlar:\n• /osint @kullanici\n• /osint 905051234567\n• /osint email@adres.com\n• /osint instagram.com/kullanici\n• /osint tiktok.com/@kullanici")
+        return
+    
+    msg = bot.send_message(user_id, get_text(user_id, 'searching'))
+    
+    try:
+        result = perform_osint_search(query, user_id)
+        
+        if deduct_credit(user_id, COST_PER_SEARCH):
+            new_credit = get_user_credit(user_id)
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("🔄 Tekrar Sorgula", callback_data=f"repeat_{query[:50]}"))
+            markup.add(InlineKeyboardButton("💰 Kredi Durumu", callback_data="check_credit"))
+            markup.add(InlineKeyboardButton("📞 WhatsApp", url=WHATSAPP_LINK))
+            
+            bot.edit_message_text(f"{result}\n\n💎 Kalan Kredi: {new_credit}", user_id, msg.message_id, reply_markup=markup)
+        else:
+            bot.edit_message_text(get_text(user_id, 'no_credit'), user_id, msg.message_id)
+    except Exception as e:
+        bot.edit_message_text(f"{get_text(user_id, 'not_found')}\n\nHata: {str(e)}", user_id, msg.message_id)
+
+@bot.message_handler(commands=['kredi', 'credits'])
+def credit_command(message):
+    user_id = message.from_user.id
+    
+    if not is_channel_member(user_id):
+        bot.send_message(user_id, get_text(user_id, 'need_channel'))
+        return
+    
+    credit = get_user_credit(user_id)
+    bot_username = bot.get_me().username
+    invite_link = f"https://t.me/{bot_username}?start={user_id}"
+    
+    text = f"""
+💰 <b>KREDI DURUMU</b>
+━━━━━━━━━━━━━━━━━━━━
+💎 Mevcut Kredi: <b>{credit}</b>
+━━━━━━━━━━━━━━━━━━━━
+📨 <b>DAVET LINKIN:</b>
+<code>{invite_link}</code>
+━━━━━━━━━━━━━━━━━━━━
+🎯 {INVITE_REQUIRED} davet = {INVITE_CREDIT_REWARD} kredi
+━━━━━━━━━━━━━━━━━━━━
+📞 Kredi almak icin: @elsephyselegram
+"""
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📤 Linki Paylas", switch_inline_query=f"{BOT_NAME} botunu kullanmaya basla! {invite_link}"))
+    bot.send_message(user_id, text, reply_markup=markup)
+
+@bot.message_handler(commands=['profil', 'profile'])
+def profile_command(message):
+    user_id = message.from_user.id
+    
+    if not is_channel_member(user_id):
+        bot.send_message(user_id, get_text(user_id, 'need_channel'))
+        return
+    
+    c.execute("SELECT credit, total_searches, join_date, invite_count FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    
+    if row:
+        credit, total_searches, join_date, invite_count = row
+        join_date_str = datetime.fromtimestamp(join_date).strftime('%d.%m.%Y') if join_date else 'Bilinmiyor'
+        
+        text = f"""
+👤 <b>PROFIL BILGILERIM</b>
+━━━━━━━━━━━━━━━━━━━━
+🆔 ID: <code>{user_id}</code>
+👤 Isim: {message.from_user.first_name}
+💎 Kredi: {credit}
+🔍 Toplam Sorgu: {total_searches}
+📨 Davet Sayisi: {invite_count}
+📅 Katilim: {join_date_str}
+━━━━━━━━━━━━━━━━━━━━
+🎯 {INVITE_REQUIRED} davet = {INVITE_CREDIT_REWARD} kredi
+"""
+        bot.send_message(user_id, text)
+
+@bot.message_handler(commands=['davet', 'invite'])
+def invite_command(message):
+    user_id = message.from_user.id
+    
+    if not is_channel_member(user_id):
+        bot.send_message(user_id, get_text(user_id, 'need_channel'))
+        return
+    
+    bot_username = bot.get_me().username
+    invite_link = f"https://t.me/{bot_username}?start={user_id}"
+    
+    text = f"""
+📨 <b>DAVET SISTEMI</b>
+━━━━━━━━━━━━━━━━━━━━
+🔗 Davet Linkin:
+<code>{invite_link}</code>
+━━━━━━━━━━━━━━━━━━━━
+🎯 {INVITE_REQUIRED} davet = {INVITE_CREDIT_REWARD} kredi
+━━━━━━━━━━━━━━━━━━━━
+📤 Arkadaslarini davet et, bedava kredi kazan!
+"""
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📤 Linki Paylas", switch_inline_query=f"{BOT_NAME} botunu kullanmaya basla! {invite_link}"))
+    bot.send_message(user_id, text, reply_markup=markup)
+
+@bot.message_handler(commands=['dil', 'language'])
+def language_command(message):
+    user_id = message.from_user.id
+    
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("🇹🇷 Turkce", callback_data="lang_tr"),
+        InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"),
+        InlineKeyboardButton("🇷🇺 Russkiy", callback_data="lang_ru")
+    )
+    bot.send_message(user_id, "🌍 Dil secin / Select language / Vyberite yazyk:", reply_markup=markup)
+
+@bot.message_handler(commands=['destek', 'support'])
+def support_command(message):
+    user_id = message.from_user.id
+    
+    if not is_channel_member(user_id):
+        bot.send_message(user_id, get_text(user_id, 'need_channel'))
+        return
+    
+    text = f"""
+🎫 <b>DESTEK SISTEMI</b>
+━━━━━━━━━━━━━━━━━━━━
+📞 WhatsApp: {WHATSAPP_NUMBER}
+👤 Telegram: @elsephyselegram
+━━━━━━━━━━━━━━━━━━━━
+📝 Destek talebi olusturmak icin mesajinizi yazin:
+"""
+    bot.send_message(user_id, text)
+    bot.register_next_step_handler(message, create_ticket)
+
+def create_ticket(message):
+    user_id = message.from_user.id
+    ticket_id = int(time.time())
+    
+    c.execute("INSERT INTO tickets (id, user_id, message, created_at) VALUES (?,?,?,?)",
+              (ticket_id, user_id, message.text, int(time.time())))
+    conn.commit()
+    
+    bot.send_message(user_id, f"✅ Ticket #{ticket_id} olusturuldu! En kisa surede donus yapilacak.")
+    bot.send_message(OWNER_ID, f"🎫 YENI TICKET #{ticket_id}\n👤 Kullanici: {user_id}\n📝 Mesaj: {message.text}")
+
+@bot.message_handler(commands=['yardim', 'help'])
+def help_command(message):
+    user_id = message.from_user.id
+    
+    if not is_channel_member(user_id):
+        bot.send_message(user_id, get_text(user_id, 'need_channel'))
+        return
+    
+    bot.send_message(user_id, get_text(user_id, 'help'))
+
+@bot.message_handler(commands=['panel'])
+def panel_command(message):
+    user_id = message.from_user.id
+    
+    if user_id != OWNER_ID:
+        bot.send_message(user_id, "⛔ Bu komut sadece bot sahibine ozeldir!")
+        return
+    
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("📊 Istatistik", callback_data="admin_stats"),
+        InlineKeyboardButton("📢 Duyuru", callback_data="admin_announce"),
+        InlineKeyboardButton("➕ Kredi Ekle", callback_data="admin_add_credit"),
+        InlineKeyboardButton("🔑 Key Olustur", callback_data="admin_gen_key"),
+        InlineKeyboardButton("📜 Loglar", callback_data="admin_logs"),
+        InlineKeyboardButton("👥 Kullanicilar", callback_data="admin_users")
+    )
+    bot.send_message(OWNER_ID, "👑 <b>OWNER PANELI</b>", reply_markup=markup)
+
+@bot.message_handler(commands=['redeem'])
+def redeem_command(message):
+    user_id = message.from_user.id
+    
+    if not is_channel_member(user_id):
+        bot.send_message(user_id, get_text(user_id, 'need_channel'))
+        return
+    
+    key = message.text.replace('/redeem', '').strip()
+    if not key:
+        bot.send_message(user_id, "🔑 Kullanim: /redeem <ANAHTAR>")
+        return
+    
+    c.execute("SELECT amount, used FROM credit_keys WHERE code=?", (key,))
+    row = c.fetchone()
+    
+    if row and row[1] == 0:
+        amount = row[0]
+        add_credit(user_id, amount)
+        c.execute("UPDATE credit_keys SET used=1 WHERE code=?", (key,))
+        conn.commit()
+        bot.send_message(user_id, f"✅ {amount} kredi hesabiniza eklendi! Yeni bakiye: {get_user_credit(user_id)}")
+        bot.send_message(OWNER_ID, f"🔑 {user_id} kodu kullandi: {key} (+{amount} kredi)")
+    else:
+        bot.send_message(user_id, "❌ Gecersiz veya kullanilmis anahtar!")
+
+# ============================================================================================================
+# 📞 CALLBACK HANDLER
+# ============================================================================================================
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    user_id = call.from_user.id
+    data = call.data
+    
+    if data.startswith("lang_"):
+        lang = data.split("_")[1]
+        c.execute("UPDATE users SET language=? WHERE user_id=?", (lang, user_id))
+        conn.commit()
+        bot.answer_callback_query(call.id, f"Dil {lang.upper()} olarak ayarlandi!")
+        bot.send_message(user_id, get_text(user_id, 'welcome'))
+    
+    elif data == "check_credit":
+        credit = get_user_credit(user_id)
+        bot.answer_callback_query(call.id, f"💎 Kredin: {credit}", show_alert=True)
+    
+    elif data.startswith("repeat_"):
+        query = data.replace("repeat_", "")
+        if get_user_credit(user_id) >= COST_PER_SEARCH:
+            result = perform_osint_search(query, user_id)
+            if deduct_credit(user_id, COST_PER_SEARCH):
+                new_credit = get_user_credit(user_id)
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("🔄 Tekrar", callback_data=f"repeat_{query[:50]}"))
+                bot.send_message(user_id, f"{result}\n\n💎 Kalan Kredi: {new_credit}", reply_markup=markup)
+            else:
+                bot.send_message(user_id, get_text(user_id, 'no_credit'))
+        else:
+            bot.send_message(user_id, get_text(user_id, 'no_credit'))
+    
+    elif user_id == OWNER_ID:
+        if data == "admin_stats":
+            c.execute("SELECT COUNT(*) FROM users")
+            total_users = c.fetchone()[0]
+            c.execute("SELECT SUM(credit) FROM users")
+            total_credits = c.fetchone()[0] or 0
+            c.execute("SELECT COUNT(*) FROM osint_logs")
+            total_searches = c.fetchone()[0]
+            c.execute("SELECT COUNT(*) FROM tickets WHERE status='open'")
+            open_tickets = c.fetchone()[0]
+            
+            stats = f"""
+📊 <b>BOT ISTATISTIKLERI</b>
+━━━━━━━━━━━━━━━━━━━━
+👥 Toplam Kullanici: {total_users}
+💎 Toplam Kredi: {total_credits}
+🔍 Toplam Sorgu: {total_searches}
+🎫 Acik Ticket: {open_tickets}
+━━━━━━━━━━━━━━━━━━━━
+📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}
+"""
+            bot.send_message(OWNER_ID, stats)
+        
+        elif data == "admin_logs":
+            c.execute("SELECT user_id, query, query_type, timestamp FROM osint_logs ORDER BY timestamp DESC LIMIT 10")
+            logs = c.fetchall()
+            if logs:
+                text = "📜 <b>SON 10 OSINT LOG</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                for log in logs:
+                    date = datetime.fromtimestamp(log[3]).strftime('%d.%m %H:%M')
+                    text += f"👤 {log[0]} | {date}\n🔎 [{log[2]}] {log[1][:40]}\n━━━━━━━━━━━━━━━━━━━━\n"
+                bot.send_message(OWNER_ID, text[:4000])
+            else:
+                bot.send_message(OWNER_ID, "📭 Henuz log kaydi yok.")
+        
+        elif data == "admin_users":
+            c.execute("SELECT user_id, credit, total_searches FROM users ORDER BY join_date DESC LIMIT 20")
+            users = c.fetchall()
+            text = "👥 <b>SON 20 KULLANICI</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+            for user in users:
+                text += f"🆔 {user[0]} | 💎{user[1]} | 🔍{user[2]}\n"
+            bot.send_message(OWNER_ID, text[:4000])
+        
+        elif data == "admin_announce":
+            bot.send_message(OWNER_ID, "📢 Duyuru metnini gonder:")
+            bot.register_next_step_handler_by_chat_id(OWNER_ID, process_announce)
+        
+        elif data == "admin_add_credit":
+            bot.send_message(OWNER_ID, "➕ Kullanici ID ve miktar girin:\nOrnek: 8682060694 50")
+            bot.register_next_step_handler_by_chat_id(OWNER_ID, process_add_credit)
+        
+        elif data == "admin_gen_key":
+            key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=20))
+            amount = 50
+            c.execute("INSERT INTO credit_keys (code, amount, created_by) VALUES (?,?,?)", (key, amount, OWNER_ID))
+            conn.commit()
+            bot.send_message(OWNER_ID, f"🔑 Yeni anahtar: <code>{key}</code>\n💰 Miktar: {amount} kredi\n📌 Kullanicilar /redeem {key} ile kullanabilir.")
+
+def process_announce(message):
+    if message.from_user.id != OWNER_ID:
+        return
+    
+    announce_text = message.text
+    c.execute("SELECT user_id FROM users")
+    users = c.fetchall()
+    
+    success = 0
+    for user in users:
+        try:
+            bot.send_message(user[0], f"📢 <b>DUYURU</b>\n━━━━━━━━━━━━━━━━━━━━\n{announce_text}")
+            success += 1
+            time.sleep(0.05)
+        except:
+            pass
+    
+    bot.send_message(OWNER_ID, f"✅ Duyuru {success} kullaniciya gonderildi.")
+
+def process_add_credit(message):
+    if message.from_user.id != OWNER_ID:
+        return
+    
+    try:
+        parts = message.text.split()
+        user_id = int(parts[0])
+        amount = int(parts[1])
+        add_credit(user_id, amount)
+        bot.send_message(OWNER_ID, f"✅ {user_id} ID'li kullaniciya {amount} kredi eklendi.")
+        bot.send_message(user_id, f"🎉 Hesabiniza {amount} kredi eklendi! Yeni bakiye: {get_user_credit(user_id)}")
+    except:
+        bot.send_message(OWNER_ID, "❌ Hatali format! Ornek: 8682060694 50")
+
+# ============================================================================================================
+# 🚀 BOTU BASLAT
+# ============================================================================================================
+
+def main():
+    print("=" * 60)
+    print(f"🤖 {BOT_NAME} v{BOT_VERSION} BASLATILDI!")
+    print(f"👤 Owner ID: {OWNER_ID}")
+    print(f"📢 Kanal: {CHANNEL_USERNAME}")
+    print(f"📞 WhatsApp: {WHATSAPP_NUMBER}")
+    print(f"🔍 OSINT Modulu: AKTIF")
+    print(f"💰 Kredi Sistemi: AKTIF")
+    print(f"🌍 Dil Destegi: TR/EN/RU")
+    print("=" * 60)
+    
+    bot.infinity_polling(timeout=30)
+
+if __name__ == "__main__":
+    main()
